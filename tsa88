@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+from typing import Any, Literal, Optional, List, Dict, Tuple
+from pydantic import BaseModel, Field, model_validator
+
+
+ObjectType = Literal["text", "image", "shape", "video", "frame", "group"]
+
+
+class Vec2(BaseModel):
+    x: float
+    y: float
+
+    def as_tuple(self) -> tuple[float, float]:
+        return (self.x, self.y)
+
+
+class Size2(BaseModel):
+    w: float = Field(gt=0)
+    h: float = Field(gt=0)
+
+    def as_tuple(self) -> tuple[float, float]:
+        return (self.w, self.h)
+
+
+class PresentationObject(BaseModel):
+    id: str = Field(min_length=1)
+    type: ObjectType
+    content: Optional[Any] = None
+
+    # local transform
+    position: Vec2 = Field(default_factory=lambda: Vec2(x=0.0, y=0.0))
+    rotation: float = 0.0  # degrees
+    scale: float = Field(default=1.0, gt=0.0)
+
+    parent_id: Optional[str] = None
+    z_index: int = 0
+
+    # sizing hints (needed for framing/culling); for frames it's strongly recommended
+    size: Optional[Size2] = None
+
+    # computed globals (filled by engine)
+    global_position: Optional[Tuple[float, float]] = None
+    global_scale: Optional[float] = None
+    global_rotation: Optional[float] = None
+
+
+class CameraState(BaseModel):
+    x: float
+    y: float
+    scale: float = Field(gt=0.0)
+    rotation: float = 0.0  # degrees
+
+
+class PathPoint(BaseModel):
+    target_object_id: Optional[str] = None
+    target_camera_position: Optional[Tuple[float, float]] = None
+    target_camera_scale: Optional[float] = Field(default=None, gt=0.0)
+    target_camera_rotation: Optional[float] = None
+
+    transition_duration: float = Field(default=1.5, gt=0.0)
+    easing_function: str = Field(default="ease_in_out_cubic")
+    narration_text: Optional[str] = None
+
+    # optional: for pan bezier
+    bezier_control_points: Optional[List[Tuple[float, float]]] = None  # [p1, p2]
+
+
+class PresentationInput(BaseModel):
+    presentation_structure: List[PresentationObject]
+    navigation_path: List[PathPoint]
+
+    # simulation/render parameters
+    viewport_size: Tuple[int, int] = (1920, 1080)
+    frame_dt: float = Field(default=0.05, gt=0.0)  # seconds per generated frame
+    framing_margin: float = Field(default=0.12, ge=0.0, le=0.45)  # 12% margin
+    min_pixel_size: float = Field(default=2.0, gt=0.0)  # culling threshold
+
+    @model_validator(mode="after")
+    def validate_ids(self) -> "PresentationInput":
+        ids = [o.id for o in self.presentation_structure]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate object id found in presentation_structure.")
+        obj_map = {o.id: o for o in self.presentation_structure}
+        for o in self.presentation_structure:
+            if o.parent_id is not None and o.parent_id not in obj_map:
+                raise ValueError(f"Object '{o.id}' has missing parent_id '{o.parent_id}'.")
+        if len(self.navigation_path) < 1:
+            raise ValueError("navigation_path must have at least 1 path point.")
+        return self
+
+
+class FrameAnimation(BaseModel):
+    timestamp: float
+    current_camera_state: Tuple[float, float, float, float]  # x, y, scale, rotation
+    visible_objects: List[str]
+    narration_cue: Optional[str] = None
+
+
+class TransitionPlan(BaseModel):
+    transition_id: str
+    start_path_point: Dict[str, Any]
+    end_path_point: Dict[str, Any]
+    frames: List[FrameAnimation]
+
+
+class PresentationOutput(BaseModel):
+    final_presentation_structure: List[PresentationObject]
+    animation_plan: List[TransitionPlan]
